@@ -16,6 +16,7 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import mqtt from 'mqtt';
 import { AppDataSource } from "./data-source";
 import { EnvLog } from "./entity/EnvLog";
 
@@ -39,10 +40,50 @@ server.listen(port, '0.0.0.0', () => {
 AppDataSource.initialize()
   .then(() => {
     console.log("DB connected");
+
+    // MQTTクライアントを起動
+    startMqttClient();
   })
   .catch((err) => {
     console.error("DB connection error:", err);
   });
+
+/**
+ * MQTTクライアント（ブローカーからデータ受信）
+ */
+function startMqttClient() {
+  const mqttClient = mqtt.connect('mqtt://mosquitto:1883');
+
+  // 成功時
+  mqttClient.on('connect', () => {
+    console.log('MQTT connected');
+    mqttClient.subscribe('env/logs', (err) => {
+      if (err) console.error('MQTT subscribe error:', err);
+      else console.log('MQTT subscribed: env/logs');
+    });
+  });
+
+  // データ受信時
+  mqttClient.on('message', async (topic, message) => {
+    try {
+      const body = JSON.parse(message.toString());
+      const repo = AppDataSource.getRepository(EnvLog);
+
+      const newLog = repo.create({ ...body });
+      await repo.save(newLog);
+
+      io.emit('env_log_update', newLog);
+
+      console.log('MQTT → DB saved:', body);
+    } catch (err) {
+      console.error('MQTT message error:', err);
+    }
+  });
+
+  mqttClient.on('error', (err) => {
+    console.error('MQTT error:', err);
+  });
+}  
 
 /**
  * GET: データ取得（フロント用）
@@ -66,21 +107,4 @@ app.get('/api/env-logs', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "DB error" });
   }
-});
-
-/**
- * POST: データ受信（curl用）
- */
-app.post('/api/env-logs', async (req, res) => {
-  const repo = AppDataSource.getRepository(EnvLog);
-
-  const newLog = repo.create({
-    ...req.body,
-  });
-
-  await repo.save(newLog);
-
-  io.emit('env_log_update', newLog);
-
-  res.json({ success: true });
 });
